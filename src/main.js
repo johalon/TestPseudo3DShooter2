@@ -4,11 +4,14 @@ import { input, initInput, endFrame, tapIn } from './input.js';
 import { sfx } from './audio.js';
 import { loadAssets, drawSpr } from './assets.js';
 import { Game, Backdrop } from './game.js';
+import { SHIPS } from './ships.js';
+import { STAGES } from './stage.js';
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const params = new URLSearchParams(location.search);
-const DEBUG = { t: +params.get('t') || 0, god: params.has('god'), bot: params.has('bot'), auto: params.has('auto') };
+const DEBUG = { t: +params.get('t') || 0, god: params.has('god'), bot: params.has('bot'), auto: params.has('auto'), speed: +params.get('speed') || 1,
+  ship: params.has('ship') ? +params.get('ship') : null, stage: Math.max(0, (+params.get('stage') || 1) - 1) };
 
 let scene = 'loading', game = null, paused = false, titleT = 0, result = null;
 const backdrop = new Backdrop();
@@ -18,6 +21,8 @@ const store = {
   set(k, v) { try { localStorage.setItem('stardepth.' + k, JSON.stringify(v)); } catch (_) {} },
 };
 let hiScore = store.get('hi', 0);
+let shipSel = DEBUG.ship ?? store.get('ship', 0), selT = 0;
+const shipHi = id => store.get('hi_' + id, 0);
 
 function resize() {
   layout(canvas);
@@ -29,8 +34,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) { if (scene === 'play') { paused = true; game.cancelLocks(); } sfx.suspend(); } else sfx.resume();
 });
 
-function startGame() {
-  game = new Game({ t: DEBUG.t, god: DEBUG.god, bot: DEBUG.bot });
+function startGame(stage = DEBUG.stage, continues = 0) {
+  game = new Game({ t: stage === DEBUG.stage ? DEBUG.t : 0, god: DEBUG.god, bot: DEBUG.bot, ship: shipSel, stage, continues });
   scene = 'play'; paused = false;
 }
 
@@ -43,7 +48,7 @@ function text(s, x, y, size, color, align = 'center', font) {
 function button(label, x, y, w, h) {
   ctx.fillStyle = 'rgba(20,40,80,0.75)'; ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = '#7fdcff'; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
-  text(label, x + w / 2, y + h / 2 + 1, 15, '#ffffff');
+  text(label, x + w / 2, y + h / 2 + 1, label.length > 12 ? 13 : 15, '#ffffff');
   return tapIn(x, y, w, h);
 }
 
@@ -52,7 +57,7 @@ function title(dt) {
   titleT += dt;
   backdrop.update(dt, 8);
   backdrop.draw(ctx, Math.sin(titleT * 0.3) * 0.5, -2);
-  drawSpr(ctx, 'playerShip1_blue', W / 2, 400 + Math.sin(titleT * 2) * 6, 80, Math.sin(titleT * 0.9) * 0.15);
+  drawSpr(ctx, SHIPS[shipSel].spr, W / 2, 400 + Math.sin(titleT * 2) * 6, 80, Math.sin(titleT * 0.9) * 0.15);
   text('STAR', W / 2, 130, 44, '#ffffff');
   text('DEPTH', W / 2, 180, 44, '#7fdcff');
   text(`HI ${String(hiScore).padStart(8, '0')}`, W / 2, 232, 13, '#ffcf5a');
@@ -60,13 +65,49 @@ function title(dt) {
   text('ドラッグで移動 ・ ショットは自動', W / 2, 548, 13, '#cfe8ff', 'center', 'sans-serif');
   text('長押しでロックオン → 離して一斉発射', W / 2, 570, 13, '#cfe8ff', 'center', 'sans-serif');
   text('Assets: Kenney.nl (CC0)', W / 2, H - 16, 9, 'rgba(255,255,255,0.45)');
-  if (input.taps.length || DEBUG.auto) { sfx.play('item', 0.7); startGame(); }
+  if (DEBUG.auto) startGame();
+  else if (input.taps.length) { sfx.play('item', 0.7); scene = 'select'; selT = 0; }
+}
+
+// 機体選択
+const STAT_NAMES = ['SPEED', 'POWER', 'LOCK', 'ARMOR'];
+function select(dt) {
+  selT += dt;
+  backdrop.update(dt, 6);
+  backdrop.draw(ctx, 0, -2);
+  text('SELECT SHIP', W / 2, 52, 22, '#ffffff');
+  const n = SHIPS.length, cw = 66, x0 = W / 2 - (n - 1) * cw / 2;
+  SHIPS.forEach((s, i) => {
+    const x = x0 + i * cw, y = 118, on = i === shipSel;
+    ctx.fillStyle = on ? 'rgba(127,220,255,0.18)' : 'rgba(255,255,255,0.05)';
+    ctx.fillRect(x - 30, y - 34, 60, 68);
+    if (on) { ctx.strokeStyle = s.color; ctx.lineWidth = 2; ctx.strokeRect(x - 30, y - 34, 60, 68); }
+    drawSpr(ctx, s.spr, x, y - 4, 44);
+    text(s.name, x, y + 24, 8, on ? s.color : '#9aa8c0');
+    if (tapIn(x - 32, y - 36, 64, 72) && !on) { shipSel = i; sfx.play('lock', 0.5, 1.2); store.set('ship', i); }
+  });
+  const s = SHIPS[shipSel];
+  drawSpr(ctx, s.spr, W / 2, 250 + Math.sin(selT * 2) * 5, 110, Math.sin(selT * 1.3) * 0.12);
+  text(s.name, W / 2, 330, 24, s.color);
+  text(s.desc, W / 2, 360, 13, '#dfe9ff', 'center', 'SYS');
+  s.stats.forEach((v, i) => {
+    const y = 396 + i * 24;
+    text(STAT_NAMES[i], 80, y, 11, '#9fd7ff', 'left');
+    for (let j = 0; j < 5; j++) {
+      ctx.fillStyle = j < v ? s.color : 'rgba(255,255,255,0.12)';
+      ctx.fillRect(150 + j * 26, y - 5, 22, 10);
+    }
+  });
+  text(`HI ${String(shipHi(s.id)).padStart(8, '0')}`, W / 2, 500, 12, '#ffcf5a');
+  if (button('START', 90, 526, 180, 50)) { sfx.play('item', 0.7); startGame(0); }
+  else if (tapIn(0, 0, 70, 44)) scene = 'title';
+  text('< BACK', 12, 22, 11, '#9fd7ff', 'left');
 }
 
 function play(dt) {
   if (!paused) {
     if (tapIn(W - 44, 0, 44, 44)) { paused = true; game.cancelLocks(); }
-    else game.update(dt);
+    else for (let i = 0; i < DEBUG.speed && !game.over; i++) game.update(dt);
   }
   game.draw(ctx);
   if (paused) {
@@ -76,9 +117,12 @@ function play(dt) {
     else if (button('TITLE', 90, 356, 180, 48)) { scene = 'title'; game = null; return; }
   }
   if (game.over) {
-    const newHi = game.score > hiScore;
-    if (newHi) { hiScore = game.score; store.set('hi', hiScore); }
-    result = { score: game.score, lap: game.lap, kills: game.kills, maxVolley: game.maxVolley, rank: Math.floor(game.rank), newHi, t: 0 };
+    const id = game.ship.id, newHi = game.score > shipHi(id);
+    if (newHi) store.set('hi_' + id, game.score);
+    if (game.score > hiScore) { hiScore = game.score; store.set('hi', hiScore); }
+    if (game.allClear && game.continues === 0) store.set('clear_' + id, true);
+    result = { score: game.score, stage: game.stageIdx + 1, kills: game.kills, maxVolley: game.maxVolley,
+      rank: Math.floor(game.rank), newHi, t: 0, clear: game.allClear, cont: game.continues, ship: game.ship.name };
     scene = 'result';
   }
 }
@@ -88,14 +132,21 @@ function resultScene(dt) {
   game.update(dt * 0.3);
   game.draw(ctx);
   ctx.fillStyle = 'rgba(0,0,10,0.7)'; ctx.fillRect(0, 0, W, H);
-  text('GAME OVER', W / 2, 140, 30, '#ff6a7a');
-  text(String(result.score).padStart(8, '0'), W / 2, 200, 28, '#ffffff');
-  if (result.newHi && Math.floor(result.t * 3) % 2 === 0) text('NEW RECORD!', W / 2, 235, 14, '#ffcf5a');
-  const rows = [['LAP', result.lap], ['KILLS', result.kills], ['MAX LOCK', 'x' + result.maxVolley], ['RANK', result.rank], ['HI SCORE', hiScore]];
-  rows.forEach(([k, v], i) => { text(k, 80, 280 + i * 28, 13, '#9fd7ff', 'left'); text(String(v), 280, 280 + i * 28, 13, '#ffffff', 'right'); });
+  if (result.clear) {
+    text('ALL CLEAR', W / 2, 110, 32, '#ffd23f');
+    text(result.cont ? 'おめでとう！ 次はノーコンティニューを目指そう' : 'ノーコンティニュー クリア！ おみごと！', W / 2, 146, 13, '#ffffff', 'center', 'SYS');
+  } else text('GAME OVER', W / 2, 120, 30, '#ff6a7a');
+  text(String(result.score).padStart(8, '0'), W / 2, 190, 28, '#ffffff');
+  if (result.newHi && Math.floor(result.t * 3) % 2 === 0) text('NEW RECORD!', W / 2, 222, 14, '#ffcf5a');
+  const rows = [['SHIP', result.ship], ['STAGE', result.clear ? 'ALL' : result.stage], ['KILLS', result.kills],
+    ['MAX LOCK', 'x' + result.maxVolley], ['RANK', result.rank], ['CONTINUE', result.cont]];
+  rows.forEach(([k, v], i) => { text(k, 80, 256 + i * 26, 12, '#9fd7ff', 'left'); text(String(v), 280, 256 + i * 26, 12, '#ffffff', 'right'); });
   if (result.t > 1) {
-    if (button('RETRY', 90, 440, 180, 48)) startGame();
-    else if (button('TITLE', 90, 505, 180, 48)) { scene = 'title'; game = null; }
+    const canCont = !result.clear;
+    if (canCont && button(`CONTINUE (STAGE ${result.stage})`, 60, 420, 240, 48)) startGame(result.stage - 1, result.cont + 1);
+    else if (button('RETRY', 60, canCont ? 480 : 440, 110, 44)) startGame(0);
+    else if (button('TITLE', 190, canCont ? 480 : 440, 110, 44)) { scene = 'title'; game = null; }
+    if (canCont) text('コンティニューするとスコアは0から', W / 2, 540, 11, '#9aa8c0', 'center', 'SYS');
   }
 }
 
@@ -127,6 +178,7 @@ function step(dt) {
   gameTransform(ctx);
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
   if (scene === 'title') title(dt);
+  else if (scene === 'select') select(dt);
   else if (scene === 'play') play(dt);
   else if (scene === 'result') resultScene(dt);
   else { ctx.fillStyle = '#05060f'; ctx.fillRect(0, 0, W, H); text('LOADING...', W / 2, H / 2, 14, '#ffffff'); }
