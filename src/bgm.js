@@ -18,7 +18,7 @@ const TRACKS = {
 const midi = m => 440 * Math.pow(2, (m - 69) / 12);
 
 export const bgm = {
-  on: true, want: null, cur: null, timer: null, nextT: 0, step: 0, out: null, noise: null,
+  on: true, intense: false, want: null, cur: null, timer: null, nextT: 0, step: 0, out: null, noise: null,
 
   play(name) { this.want = name; if (!this.timer) this.timer = setInterval(() => this.tick(), 25); },
   stop() { this.want = null; },
@@ -57,6 +57,10 @@ export const bgm = {
     if (tr.kick.includes(s)) this.kick(c, t, tr.soft ? 0.5 : 0.9);
     if (!tr.soft && (s === 4 || s === 12)) this.hit(c, t, 0.35, 1800, 0.12);
     if (s % 4 === 2) this.hit(c, t, tr.soft ? 0.06 : 0.12, 8000, 0.04);
+    if (this.intense) { // 危険区間：16分のハイハットと追加スネアで緊張感を上げる
+      if (s % 2 === 1) this.hit(c, t, 0.07, 9000, 0.03);
+      if (s === 14 || s === 15) this.hit(c, t, 0.25, 1800, 0.08);
+    }
     // ベース
     const b = tr.bass[s];
     if (b !== null) this.tone(c, 'sawtooth', midi(chordRoot - 12 + b), t, sd * 0.9, 0.16, 900);
