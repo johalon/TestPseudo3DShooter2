@@ -1,8 +1,11 @@
 // ゲーム本体（v2 縦切り版）
 // 大原則：自機の位置取りが攻撃と回避を兼ねる
-//  - ショットは自機の位置から真っすぐ奥へ（エイムアシストなし）
-//  - ロックオンは照準の中に敵をとどめ続けると1つずつ取れる（外れると進捗が減る）
-//  - 一斉発射はエネルギー制（ロック1つ＝1消費、時間で回復）
+// 基本戦略：普段はショットで正面の敵を1体ずつ処理して場を保つ。処理が追いつかなくなった瞬間に、
+//          ロックオンで一気に片付けて主導権を取り戻す（ショットで稼いで、ロックで使う）
+//  - ショット（メイン）：自機の位置から真っすぐ奥へ。タダだが、敵の正面＝狙われる位置に入る必要があり、1体ずつしか削れない
+//  - ロックオン（打開の切り札）：ダブルタップで発動。自機から広がる輪が画面を掃き、近い敵から順に
+//    エネルギーの数だけロック → 一斉発射。エネルギーが0なら発動しない（宙返りは別の機体の個性に回した）
+//  - エネルギーは時間では回復しない。ショットで敵を倒すと溜まる（リングでも回復）
 //  - 敵の攻撃は必ず予兆を出してから、自機の位置を狙ってくる
 import { W, H } from './view.js';
 import { drawSpr, drawGlow, glow } from './assets.js';
@@ -15,21 +18,23 @@ export const F = 300, VPX = 180, VPY = 250, ZP = 3, ZFAR = 40;
 const XR = 2.2, YMIN = -1.6, YMAX = 1.1;
 const CAMF = 0.3, SENS = 1.35;
 const SHOT_SPEED = 40, SHOT_INT = 0.14;
-const LOCK_R = 0.6, LASER_DMG = 3, ENERGY_MAX = 6, ENERGY_REGEN = 1.4; // 秒/1
+const LASER_DMG = 4, ENERGY_MAX = 8, ENERGY_START = 3;
+const SWEEP_R = 3.2, SWEEP_T = 0.35; // ロックの輪が広がる最大半径と時間
 const PLAYER_R = 0.2, BULLET_SPEED = 9;
+const GUN_SPREAD = 0.35, GUN_LANE = GUN_SPREAD + PLAYER_R + 0.1; // 砲撃機の射線の幅（自機の面での半径）
 
 // 敵の種類：lockT はロックに必要な時間（秒）
 const T = {
   scout:   { spr: 'enemyRed1',   size: 0.8,  r: 0.42, hp: 3,  score: 100,  lockT: 0.2 },
-  gunner:  { spr: 'enemyBlack1', size: 1.0,  r: 0.5,  hp: 14,  score: 400,  lockT: 0.45 },
-  sniper:  { spr: 'enemyBlack3', size: 0.9,  r: 0.46, hp: 5,  score: 400,  lockT: 0.35 },
+  gunner:  { spr: 'enemyBlack1', size: 1.0,  r: 0.5,  hp: 12,  score: 400,  lockT: 0.45 },
+  sniper:  { spr: 'enemyBlack3', size: 0.9,  r: 0.46, hp: 4,  score: 400,  lockT: 0.35 },
   bomber:  { spr: 'enemyRed3',   size: 0.85, r: 0.45, hp: 3,  score: 200,  lockT: 0.25 },
   carrier: { spr: 'enemyGreen4', size: 1.05, r: 0.52, hp: 16, score: 600,  lockT: 0.5 },
   charger: { spr: 'enemyBlue4',  size: 0.9,  r: 0.46, hp: 8,  score: 400,  lockT: 0.35 },
   mine:    { spr: 'ufoYellow',   size: 0.55, r: 0.35, hp: 2,  score: 80,   lockT: 0.2, spin: 2 },
-  turret:  { spr: 'ufoBlue',     size: 0.7,  r: 0.4,  hp: 20, score: 800,  lockT: 0.4, spin: 1 },
+  turret:  { spr: 'ufoBlue',     size: 0.7,  r: 0.4,  hp: 16, score: 800,  lockT: 0.4, spin: 1 },
   flank:   { spr: 'spaceStation_024', size: 6, r: 0, hp: 1, score: 0, deco: true },
-  cruiser: { spr: 'spaceShips_007', size: 4.4, r: 1.3, hp: 110, score: 20000, lockT: 0.4 },
+  cruiser: { spr: 'spaceShips_007', size: 4.4, r: 1.3, hp: 120, score: 20000, lockT: 0.4 },
 };
 
 // ================= 背景 =================
@@ -91,14 +96,15 @@ export class Game {
     this.cam = { x: 0, y: -2 };
     this.over = false; this.clear = false; this.deadT = 0;
     this.shake = 0; this.flash = 0;
-    this.energy = ENERGY_MAX; this.energyT = 0;
-    this.roll = 0; this.rollCd = 0;
+    this.energy = ENERGY_START; this.energyFlash = 0; this.sweep = null;
+    this.lockCd = 0;
     this.enemies = []; this.eBullets = []; this.shots = []; this.lasers = []; this.fx = [];
     this.items = []; this.rings = []; this.popups = []; this.notes = []; this.locks = []; this.timers = [];
     this.boss = null; this.beam = null; this.msg = null; this.clearT = 0;
     this.shotT = 0; this.shotSide = 1; this.age = 0;
     this.tension = 0; this.sectionName = '';
     this.log = []; this.logT = 0; // 緩急の計測用
+    this.stat = { shotDmg: 0, laserDmg: 0, shotKill: 0, laserKill: 0, otherKill: 0, frontHits: 0 };
     this.t = opts.t || 0; this.ev = 0;
     const evs = this.level.events;
     while (this.ev < evs.length && evs[this.ev][0] <= this.t) this.ev++;
@@ -148,7 +154,7 @@ export class Game {
 
   spawnBoss() {
     const b = this.spawn('cruiser', 0, -0.7, ZFAR, null);
-    b.armor = true; b.vent = 0; b.cannonT = 6; b.summonT = 8; b.arrived = false;
+    b.armor = true; b.vent = 0; b.cannonT = 6; b.summonT = 5; b.arrived = false;
     b.turrets = [[-1.7, -0.25], [1.7, -0.25], [-1.0, 0.45], [1.0, 0.45]].map(([dx, dy], i) => {
       const t = this.spawn('turret', b.x + dx, b.y + dy, b.z - 0.3, (e) => { e.x = b.x + dx; e.y = b.y + dy; e.z = b.z - 0.3; });
       t.aiT = 2.5 + i * 1.1; t.boss = true;
@@ -182,11 +188,10 @@ export class Game {
       p.vx = (nx - p.x) / dt; p.x = nx; p.y = ny;
       p.bank += (Math.max(-1, Math.min(1, p.vx * 0.12)) - p.bank) * Math.min(1, dt * 10);
       p.inv = Math.max(0, p.inv - dt);
-      this.roll = Math.max(0, this.roll - dt); this.rollCd = Math.max(0, this.rollCd - dt);
-      if (input.doubleTap && this.rollCd <= 0 && this.age > 0.5) { this.roll = 0.45; this.rollCd = 1.2; sfx.play('shield', 0.35, 1.6); }
-      // エネルギー回復
-      if (this.energy < ENERGY_MAX) { this.energyT += dt; if (this.energyT >= ENERGY_REGEN) { this.energyT = 0; this.energy++; } }
-      if (this.clearT <= 0) { this.autoFire(dt); this.updateLock(dt); }
+      this.lockCd = Math.max(0, this.lockCd - dt);
+      if (input.doubleTap && this.age > 0.5) this.trigger();
+      this.energyFlash = this.energyFlash > 0 ? Math.max(0, this.energyFlash - dt) : Math.min(0, this.energyFlash + dt);
+      if (this.clearT <= 0) { this.autoFire(dt); this.updateSweep(dt); }
     } else {
       this.deadT += dt;
       if (this.deadT > 2.2) this.over = true;
@@ -230,6 +235,8 @@ export class Game {
       const t = (b.z - ZP) / -b.vz;
       threats.push([b.x + b.vx * t, b.y + b.vy * t]);
     }
+    // 光っている砲撃機の射線にも入らない
+    for (const e of this.enemies) if (e.type === 'gunner' && e.ai >= 1 && e.fx !== undefined && e.z < 28) threats.push([e.fx, e.fy]);
     const risk = (x, y) => threats.reduce((m, [fx, fy]) => Math.min(m, Math.hypot(fx - x, fy - y)), 9);
     let danger = false;
     if (risk(p.x, p.y) < 0.55 || risk(tx, ty) < 0.55) {
@@ -243,12 +250,13 @@ export class Game {
       tx = bx; ty = by;
     }
     if (this.beam && (this.beam.inside(p.x, p.y) || this.beam.inside(tx, ty))) { tx = this.beam.safeX; ty = this.beam.safeY; }
-    this.botT = (this.botT || 0) + dt;
-    const cyc = this.botT % 2.4;
-    input.down = cyc < 2.0;
-    if (cyc >= 2.0 && cyc - dt < 2.0) input.released = true;
-    input.holdTime = input.down ? cyc : 0;
-    if (danger && this.opts.botRoll && this.rollCd <= 0) { this.roll = 0.45; this.rollCd = 1.2; }
+    // 打開の判断：射程内に敵が多い（数に押される）か、被弾しそう
+    if (this.lockCd <= 0 && this.energy > 0 && !this.opts.botNoLock) {
+      const near = this.enemies.filter(e => this.lockable(e) && Math.hypot(e.x - p.x, e.y - p.y) < SWEEP_R).length;
+      const b = this.boss && this.boss.alive ? this.boss : null;
+      if (b && (b.vent > 0.3 || !b.armor) && this.energy >= 4 && Math.hypot(b.x - p.x, b.y - p.y) < SWEEP_R) this.trigger(); // 排熱中のコアに温存分を叩き込む
+      else if ((near >= 4 && this.energy >= (b ? 7 : 4)) || (danger && this.energy >= 1 && near >= 1)) this.trigger();
+    }
     const k = Math.min(1, dt * 5);
     return [(tx - p.x) * k, (ty - p.y) * k];
   }
@@ -265,29 +273,42 @@ export class Game {
   }
 
   lockable(e) { return e.alive && !e.d.deco && !e.shielded && e.z > ZP + 2 && e.z < 32 && (e.type !== 'cruiser' || !e.armor || e.vent > 0); }
-  inReticle(e) { const p = this.player; return Math.hypot(e.x - p.x, e.y - p.y) < LOCK_R + e.d.r * 0.5; }
+  // ダブルタップ：エネルギーがあればロックの輪を広げる（0なら何もしない）
+  trigger() {
+    if (this.lockCd > 0 || this.sweep || this.clearT > 0) return;
+    if (this.energy <= 0) { sfx.play('hit', 0.3, 0.6); this.energyFlash = -0.4; return; }
+    this.lockCd = 0.6;
+    this.sweep = { t: 0, r: 0 };
+    sfx.play('charge', 0.5, 2.2);
+  }
 
-  updateLock(dt) {
+  // 輪が自機から広がり、触れた敵を近い順にロック（倒しきれる本数まで）。広がりきったら一斉発射
+  updateSweep(dt) {
     this.locks = this.locks.filter(e => e.alive);
-    const holding = input.down && input.holdTime > 0.12;
-    for (const e of this.enemies) {
-      if (e.d.deco) continue;
-      const can = holding && this.lockable(e) && this.inReticle(e) && this.locks.length < this.energy
-        && e.lockN < Math.ceil(e.hp / LASER_DMG);
-      if (can) {
-        e.lockP += dt / e.d.lockT;
-        if (e.lockP >= 1) {
-          e.lockP = 0; e.lockN++; this.locks.push(e);
-          sfx.play('lock', 0.45, 1 + this.locks.length * 0.07);
-        }
-      } else e.lockP = Math.max(0, e.lockP - dt * 2.5);
+    const sw = this.sweep;
+    if (!sw) return;
+    sw.t += dt; sw.r = SWEEP_R * Math.min(1, sw.t / SWEEP_T);
+    const p = this.player;
+    const cands = this.enemies.filter(e => this.lockable(e) && Math.hypot(e.x - p.x, e.y - p.y) <= sw.r)
+      .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y));
+    // 1体あたり最大3本まで（大物にエネルギーを全部吸われないように）。輪が広がりきったら余りを近い順に足す
+    const cap = sw.t >= SWEEP_T ? 99 : 3;
+    for (const e of cands) {
+      let need = Math.min(cap, Math.ceil(e.hp / LASER_DMG)) - e.lockN;
+      while (need-- > 0 && this.locks.length < this.energy) {
+        e.lockN++; this.locks.push(e);
+        sfx.play('lock', 0.4, 1 + this.locks.length * 0.07);
+      }
     }
-    if (input.released && this.locks.length) this.fireVolley();
+    if (sw.t >= SWEEP_T) {
+      this.sweep = null;
+      if (this.locks.length) this.fireVolley();
+    }
   }
 
   fireVolley() {
     const p = this.player, n = this.locks.length, volley = { n };
-    this.energy -= n; this.energyT = 0;
+    this.energy -= n;
     this.locks.forEach((e, i) => {
       const side = i % 2 ? 1 : -1;
       this.lasers.push({ e, volley, t: 0, dur: 0.24 + i * 0.03, sx: p.x, sy: p.y, sz: ZP + 0.2,
@@ -295,6 +316,7 @@ export class Game {
         tx: e.x, ty: e.y, tz: e.z, trail: [] });
     });
     this.maxVolley = Math.max(this.maxVolley, n);
+    (this.stat.volleys = this.stat.volleys || []).push([+this.t.toFixed(1), n]);
     this.locks = [];
     sfx.play('laser', 0.6, 1.2 - n * 0.03);
   }
@@ -312,7 +334,7 @@ export class Game {
         if (Math.hypot(e.x - s.x, e.y - s.y) < r) {
           s.dead = true;
           if (this.immune(e)) { this.spark(s.x, s.y, e.z - 0.3, glow.white, 2); sfx.play('hit', 0.15, 2); }
-          else { this.damage(e, 1, null); this.spark(s.x, s.y, e.z - 0.2, glow.blue, 3); }
+          else { this.damage(e, 1, null, 'shot'); this.spark(s.x, s.y, e.z - 0.2, glow.blue, 3); }
           break;
         }
       }
@@ -355,14 +377,17 @@ export class Game {
     const p = this.player, inRange = e.z > 6 && e.z < 30;
     switch (e.type) {
       case 'gunner': case 'turret': {
-        // 待機 → 光る（0.7秒）→ 3連射（撃つたびに自機の位置を狙う）
-        if (!inRange) return;
-        if (e.ai === 0) { e.aiT -= dt; if (e.aiT <= 0) { e.ai = 1; e.aiT = 0.7; sfx.play('charge', 0.25, 2); } }
-        else if (e.ai === 1) { e.aiT -= dt; if (e.aiT <= 0) { e.ai = 2; e.aiT = 0; e.burst = 0; } }
+        // 待機 → 光る（0.7秒）→ 3連射
+        // 砲撃機は自分の正面（射線＝自機の面での自分の位置のまわり）を掃くように撃つ。砲台は自機の位置を狙う
+        if (!inRange) { if (e.ai) { e.ai = 0; e.aiT = 0.5; } return; }
+        if (e.ai === 0) { e.aiT -= dt; if (e.aiT <= 0) { e.ai = 1; e.aiT = 0.7; sfx.play('charge', 0.25, 2); if (e.type === 'gunner') { e.fx = e.x; e.fy = e.y; } } }
+        else if (e.ai === 1) { e.aiT -= dt; if (e.type === 'gunner') { e.fx = e.x; e.fy = e.y; } if (e.aiT <= 0) { e.ai = 2; e.aiT = 0; e.burst = 0; } }
         else {
           e.aiT -= dt;
           if (e.aiT <= 0) {
-            this.aimBullet(e, p.x, p.y, BULLET_SPEED); e.burst++; e.aiT = 0.14;
+            if (e.type === 'gunner') this.aimBullet(e, e.fx + (e.burst - 1) * GUN_SPREAD, e.fy, BULLET_SPEED);
+            else this.aimBullet(e, p.x, p.y, BULLET_SPEED);
+            e.burst++; e.aiT = 0.14;
             if (e.burst >= 3) { e.ai = 0; e.aiT = e.type === 'turret' ? 1.7 : 1.5; }
           }
         }
@@ -431,10 +456,11 @@ export class Game {
     }
     b.cannonT -= dt;
     if (b.cannonT <= 0 && !this.beam) { this.startBeam(b, ph2); b.cannonT = ph2 ? 7 : 9; }
-    if (ph2) {
-      b.summonT -= dt;
-      if (b.summonT <= 0) {
-        b.summonT = 9;
+    // 偵察機を呼ぶ：ショットで倒してエネルギーを稼ぐための相手でもある
+    b.summonT -= dt;
+    if (b.summonT <= 0) {
+      b.summonT = ph2 ? 7 : 8;
+      {
         for (let i = 0; i < 4; i++) {
           const s = this.spawn('scout', b.x + (i - 1.5) * 0.6, b.y + 0.3, b.z + 8, mv.line(7, 0.5, i));
           s.bx = b.x + (i - 1.5) * 0.9;
@@ -472,7 +498,7 @@ export class Game {
     if (bm.fire <= 0) {
       this.beam = null;
       bm.b.vent = 3.2; // 撃った直後はコアがむき出し
-      this.note('主砲の排熱中：コアが無防備', '#ffb070');
+      this.note('排熱中！ 取っておいたエネルギーをコアへ', '#ffb070');
       if (bm.second) { // 第2段階：反対側へもう一発（予告は短め）
         const b = bm.b, side = bm.second;
         this.later(0.3, () => { if (b.alive && !this.beam) this.startBeam(b, false, side, 1.1); });
@@ -490,7 +516,7 @@ export class Game {
     for (const b of this.eBullets) {
       const pz = b.z;
       b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
-      if (p.alive && pz >= ZP && b.z < ZP && Math.hypot(b.x - p.x, b.y - p.y) < PLAYER_R + 0.08 && this.roll <= 0) { b.dead = true; this.hurt(20, b.fast ? 'snipe' : 'bullet:' + (b.src || '')); }
+      if (p.alive && pz >= ZP && b.z < ZP && Math.hypot(b.x - p.x, b.y - p.y) < PLAYER_R + 0.08) { b.dead = true; this.hurt(20, b.fast ? 'snipe' : 'bullet:' + (b.src || '')); }
     }
     this.eBullets = this.eBullets.filter(b => !b.dead && b.z > 1);
   }
@@ -548,11 +574,20 @@ export class Game {
   }
 
   // ---- ダメージ ----
-  damage(e, dmg, volley) {
+  damage(e, dmg, volley, src = null) {
     if (!e.alive) return;
+    const by = volley ? 'laser' : src;
+    if (by === 'shot') this.stat.shotDmg += Math.min(dmg, e.hp); else if (by === 'laser') this.stat.laserDmg += Math.min(dmg, e.hp);
     e.hp -= dmg; e.flash = 0.07;
     if (e.hp > 0) { sfx.play('hit', 0.22, 1.3); return; }
     e.alive = false; this.kills++;
+    if (by === 'shot') {
+      this.stat.shotKill++;
+      // ショットで倒すとエネルギーが溜まる（硬い敵ほど多い）
+      const gain = e.maxHp >= 8 ? 2 : 1, was = this.energy;
+      this.energy = Math.min(ENERGY_MAX, this.energy + gain);
+      if (this.energy > was) { this.energyFlash = 0.35; this.stat.gained = (this.stat.gained || 0) + this.energy - was; }
+    } else if (by === 'laser') this.stat.laserKill++; else this.stat.otherKill++;
     const mul = volley && e.type !== 'cruiser' ? volley.n : 1;
     const pts = e.d.score * mul;
     this.score += pts;
@@ -590,7 +625,7 @@ export class Game {
     });
     this.later(1.5, () => { sfx.play('boom', 1); this.flash = 1; });
     for (const m of this.enemies) if (m !== b && !m.d.deco) { m.alive = false; this.explode(m.x, m.y, m.z, 0.6); }
-    this.eBullets = []; this.locks = [];
+    this.eBullets = []; this.locks = []; this.sweep = null;
     const bonus = Math.round(this.player.shield) * 100 + (this.hits === 0 ? 30000 : 0);
     this.score += bonus;
     this.message('STAGE CLEAR', `SHIELD BONUS ${bonus}` + (this.hits === 0 ? '（ノーダメージ込み）' : ''), 4.5);
@@ -599,11 +634,11 @@ export class Game {
 
   hurt(dmg, src = '?') {
     const p = this.player;
-    if (p.inv <= 0 && this.roll <= 0 && p.alive && !this.opts.god && this.clearT <= 0) (this.hurtLog = this.hurtLog || []).push([+this.t.toFixed(1), src]);
-    if (p.inv > 0 || this.roll > 0 || !p.alive || this.opts.god || this.clearT > 0) return;
+    if (p.inv <= 0 && p.alive && !this.opts.god && this.clearT <= 0) (this.hurtLog = this.hurtLog || []).push([+this.t.toFixed(1), src]);
+    if (p.inv > 0 || !p.alive || this.opts.god || this.clearT > 0) return;
     p.shield -= dmg; p.inv = 1.0; this.hits++;
     this.shake = 1; this.flash = 0.5;
-    this.locks.forEach(e => e.lockN = Math.max(0, e.lockN - 1)); this.locks = [];
+    this.locks.forEach(e => e.lockN = Math.max(0, e.lockN - 1)); this.locks = []; this.sweep = null;
     sfx.play('damage', 0.9);
     if (p.shield <= 0) {
       p.shield = 0; p.alive = false; bgm.stop();
@@ -611,7 +646,7 @@ export class Game {
       sfx.play('lose', 0.9); sfx.play('bigexplode', 0.9, 0.8);
     }
   }
-  cancelLocks() { this.locks.forEach(e => e.lockN = Math.max(0, e.lockN - 1)); this.locks = []; }
+  cancelLocks() { this.locks.forEach(e => e.lockN = Math.max(0, e.lockN - 1)); this.locks = []; this.sweep = null; }
 
   explode(x, y, z, size) {
     this.fx.push({ x, y, z, vx: 0, vy: 0, vz: 0, t: 0, life: 0.45, ring: true, s: size * 1.6 });
@@ -739,6 +774,15 @@ export class Game {
   drawTelegraphs(ctx) {
     const p = this.player;
     for (const e of this.enemies) {
+      if (e.type === 'gunner' && e.ai >= 1 && e.fx !== undefined) { // 砲撃機の射線（自機の面に赤い円）
+        const [x1, y1, k] = this.proj(e.fx, e.fy, ZP + 0.5), [x0, y0] = this.proj(e.x, e.y, e.z);
+        const hot = e.ai === 2 || e.aiT < 0.25;
+        ctx.strokeStyle = hot ? (Math.floor(this.t * 20) % 2 ? '#ffffff' : '#ff3050') : `rgba(255,60,80,${0.3 + (1 - e.aiT / 0.7) * 0.4})`;
+        ctx.lineWidth = hot ? 2.5 : 1.5;
+        ctx.beginPath(); ctx.arc(x1, y1, GUN_LANE * k, 0, 7); ctx.stroke();
+        ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,60,80,0.35)';
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+      }
       if (e.type === 'sniper' && e.ai >= 1) {
         const [x0, y0] = this.proj(e.x, e.y, e.z), [x1, y1] = this.proj(e.tx, e.ty, ZP);
         const locked = e.ai === 2;
@@ -792,14 +836,13 @@ export class Game {
 
   drawPlayer(ctx, x, y, k) {
     const p = this.player;
-    if (p.inv > 0 && this.roll <= 0 && Math.floor(p.inv * 20) % 2) return;
+    if (p.inv > 0 && Math.floor(p.inv * 20) % 2) return;
     const w = 0.75 * k;
     ctx.globalCompositeOperation = 'lighter';
     drawGlow(ctx, glow.blue, x, y + w * 0.32, w * (0.18 + Math.random() * 0.05));
-    if (this.roll > 0) drawGlow(ctx, glow.white, x, y, w * 0.7);
     ctx.globalCompositeOperation = 'source-over';
     ctx.save(); ctx.translate(x, y); ctx.rotate(p.bank * 0.45);
-    const sx = this.roll > 0 ? Math.cos((1 - this.roll / 0.45) * Math.PI * 2) : 1 - Math.abs(p.bank) * 0.25;
+    const sx = 1 - Math.abs(p.bank) * 0.25;
     ctx.scale(Math.abs(sx) < 0.08 ? 0.08 : sx, 1);
     drawSpr(ctx, 'playerShip1_blue', 0, 0, w);
     ctx.restore();
@@ -825,16 +868,17 @@ export class Game {
   drawReticle(ctx) {
     const p = this.player;
     if (!p.alive || this.clearT > 0) return;
-    const locking = input.down && input.holdTime > 0.12;
-    ctx.strokeStyle = locking ? 'rgba(255,90,90,0.85)' : 'rgba(120,255,160,0.55)';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(120,255,160,0.6)'; ctx.lineWidth = 1.5;
     for (const [dz, s] of [[6, 26], [14, 16]]) {
       const [x, y] = this.proj(p.x, p.y, ZP + dz);
       ctx.strokeRect(x - s / 2, y - s / 2, s, s);
     }
-    if (locking) {
-      const [x, y, k] = this.proj(p.x, p.y, ZP + 10);
-      ctx.beginPath(); ctx.arc(x, y, LOCK_R * k, 0, 7); ctx.stroke();
+    // ロックの輪（ダブルタップで広がる）
+    if (this.sweep) { // 自機から画面いっぱいに広がる輪（判定は自機からの上下左右の距離。近い敵から順にロック）
+      const [x, y] = this.proj(p.x, p.y, ZP), f = this.sweep.r / SWEEP_R, a = 1 - f * 0.6;
+      ctx.strokeStyle = `rgba(255,90,90,${a})`; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(x, y, 30 + f * 420, 0, 7); ctx.stroke();
+      ctx.fillStyle = `rgba(255,70,70,${0.07 * a})`; ctx.fill();
     }
   }
 
@@ -859,16 +903,13 @@ export class Game {
     ctx.fillStyle = sh > 0.5 ? '#4fd3ff' : sh > 0.25 ? '#ffcf5a' : '#ff4f6a';
     ctx.fillRect(bx, by, bw * sh, 8);
     this.text(ctx, 'SHIELD', bx, by - 10, 9, '#cfe8ff', 'left');
-    ctx.fillStyle = this.rollCd > 0 ? 'rgba(255,255,255,0.25)' : '#ffffff';
-    ctx.fillRect(bx + 50, by - 13, 30 * (1 - this.rollCd / 1.2), 3);
     // エネルギー（＝撃てるロック数）
     for (let i = 0; i < ENERGY_MAX; i++) {
-      const x = W - 14 - (ENERGY_MAX - i) * 14;
-      ctx.fillStyle = i < this.locks.length ? '#ff5a5a' : i < this.energy ? '#7fffd4' : 'rgba(255,255,255,0.15)';
-      ctx.fillRect(x, by, 11, 8);
+      const x = W - 12 - (ENERGY_MAX - i) * 12;
+      ctx.fillStyle = i < this.locks.length ? '#ff5a5a' : i < this.energy ? (this.energyFlash > 0 ? '#ffffff' : '#7fffd4') : this.energyFlash < 0 ? 'rgba(255,80,80,0.5)' : 'rgba(255,255,255,0.15)';
+      ctx.fillRect(x, by, 9, 8);
     }
-    if (this.energy < ENERGY_MAX) { ctx.fillStyle = 'rgba(127,255,212,0.5)'; ctx.fillRect(W - 14 - (ENERGY_MAX - this.energy) * 14, by + 10, 11 * this.energyT / ENERGY_REGEN, 2); }
-    this.text(ctx, 'ENERGY', W - 14 - ENERGY_MAX * 14, by - 10, 9, '#7fffd4', 'left');
+    this.text(ctx, this.energy ? 'ENERGY ─ ダブルタップで一斉発射' : 'ENERGY ─ ショットで倒すと溜まる', W - 12, by - 10, 9, '#7fffd4', 'right', 'SYS');
 
     const b = this.boss;
     if (b && b.alive && b.arrived) {

@@ -11,9 +11,9 @@ import { save, persist } from './save.js';
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const params = new URLSearchParams(location.search);
-const DEBUG = { t: +params.get('t') || 0, god: params.has('god'), bot: params.has('bot'), botRoll: params.has('roll'),
+const DEBUG = { t: +params.get('t') || 0, god: params.has('god'), bot: params.has('bot'), botNoLock: params.has('nolock'),
   auto: params.has('auto'), speed: +params.get('speed') || 1 };
-DEBUG.noRecord = ['god', 'bot', 't', 'speed', 'auto', 'roll'].some(k => params.has(k));
+DEBUG.noRecord = ['god', 'bot', 't', 'speed', 'auto', 'nolock'].some(k => params.has(k));
 
 let scene = 'loading', game = null, paused = false, titleT = 0, result = null;
 const backdrop = new Backdrop();
@@ -31,7 +31,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function startGame() {
-  game = new Game({ t: DEBUG.t, god: DEBUG.god, bot: DEBUG.bot, botRoll: DEBUG.botRoll });
+  game = new Game({ t: DEBUG.t, god: DEBUG.god, bot: DEBUG.bot, botNoLock: DEBUG.botNoLock });
   scene = 'play'; paused = false;
 }
 
@@ -58,9 +58,9 @@ function title(dt) {
   text('v2 PROTOTYPE ─ STAGE 1', W / 2, 192, 11, '#ffcf5a');
   text(`HI ${String(save.hi[hiKey] || 0).padStart(8, '0')}`, W / 2, 214, 13, '#ffcf5a');
   drawSpr(ctx, 'playerShip1_blue', W / 2, 285 + Math.sin(titleT * 2) * 6, 70, Math.sin(titleT * 0.9) * 0.15);
-  text('ドラッグで移動。弾は自機の正面にまっすぐ飛ぶ', W / 2, 345, 12, '#cfe8ff', 'center', 'SYS');
-  text('長押し：照準に敵をとどめてロック → 離して発射', W / 2, 365, 12, '#cfe8ff', 'center', 'SYS');
-  text('ダブルタップ：宙返り（一瞬無敵）', W / 2, 385, 12, '#cfe8ff', 'center', 'SYS');
+  text('ドラッグで移動。ショットは正面にまっすぐ飛ぶ', W / 2, 345, 12, '#cfe8ff', 'center', 'SYS');
+  text('ショットで倒すとエネルギーが溜まる', W / 2, 365, 12, '#cfe8ff', 'center', 'SYS');
+  text('ダブルタップ：周りの敵をまとめてロック → 一斉発射', W / 2, 385, 12, '#cfe8ff', 'center', 'SYS');
   if (DEBUG.auto) { DEBUG.auto = false; startGame(); return; }
   if (button('START', 90, 430, 180, 50)) { sfx.play('item', 0.7); startGame(); }
   else if (button('BGM ' + (save.bgm ? 'ON' : 'OFF'), 60, 560, 110, 30, '#5a7090', 12)) { save.bgm = !save.bgm; bgm.setOn(save.bgm); persist(); }
