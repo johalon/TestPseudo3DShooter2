@@ -9,10 +9,11 @@ export const input = {
   released: false,    // このフレームで離された
   taps: [],           // このフレームのタップ位置（論理座標）
   x: 0, y: 0,         // 現在位置（論理座標）
+  doubleTap: false,   // このフレームでダブルタップされた（宙返り）
   onGesture: null,    // iOS の音声解除はイベントハンドラ内で行う必要がある
 };
 
-let pid = null, sx = 0, sy = 0, st = 0, lx = 0, ly = 0, moved = 0;
+let pid = null, sx = 0, sy = 0, st = 0, lx = 0, ly = 0, moved = 0, lastTap = -1e9, ldx = 0, ldy = 0;
 
 export function initInput(el) {
   el.addEventListener('pointerdown', e => {
@@ -20,6 +21,8 @@ export function initInput(el) {
     pid = e.pointerId;
     try { el.setPointerCapture(pid); } catch (_) {}
     sx = lx = e.clientX; sy = ly = e.clientY; st = performance.now(); moved = 0;
+    // 直前が「短いタップ」で、300ms以内・近い位置ならダブルタップ
+    if (st - lastTap < 300 && Math.hypot(sx - ldx, sy - ldy) < 60 * view.scale) { input.doubleTap = true; lastTap = -1e9; }
     input.down = true; input.pressed = true; input.holdTime = 0;
     [input.x, input.y] = toLogical(e.clientX, e.clientY);
     e.preventDefault();
@@ -39,7 +42,9 @@ export function initInput(el) {
     pid = null;
     input.down = false; input.released = true;
     if (input.onGesture) input.onGesture();
-    if (e.type === 'pointerup' && moved < 20 && performance.now() - st < 400) input.taps.push(toLogical(sx, sy));
+    const now = performance.now();
+    if (e.type === 'pointerup' && moved < 20 && now - st < 400) input.taps.push(toLogical(sx, sy));
+    if (e.type === 'pointerup' && moved < 20 && now - st < 250) { lastTap = now; ldx = sx; ldy = sy; }
   };
   el.addEventListener('pointerup', up);
   el.addEventListener('pointercancel', up);
@@ -58,7 +63,7 @@ export function initInput(el) {
 export function endFrame(dt) {
   if (input.down) input.holdTime += dt;
   input.dx = input.dy = 0;
-  input.pressed = input.released = false;
+  input.pressed = input.released = input.doubleTap = false;
   input.taps.length = 0;
 }
 

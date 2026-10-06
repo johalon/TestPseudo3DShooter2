@@ -1,10 +1,12 @@
-// ゲーム本体：擬似3D投影、自機、敵、弾、ロックオン、スコア、ボス、ステージ進行
+// ゲーム本体：擬似3D投影、自機、敵、弾、ロックオン、パーツ効果、スコア、ボス、ステージ進行
 import { W, H } from './view.js';
 import { drawSpr, drawGlow, glow } from './assets.js';
 import { sfx } from './audio.js';
+import { bgm } from './bgm.js';
 import { input } from './input.js';
 import { STAGES, BOSSES } from './stage.js';
 import { SHIPS } from './ships.js';
+import { PART, SYNERGIES, MEDALS, MUTATORS } from './parts.js';
 
 // ---- 投影パラメータ ----
 export const F = 300, VPX = 180, VPY = 250, ZP = 3, ZFAR = 40;
@@ -17,18 +19,21 @@ const ETYPES = {
   fighter:  { spr: 'enemyRed1',        size: 0.8,  hp: 1,  score: 100,  r: 0.42 },
   fighter2: { spr: 'enemyGreen2',      size: 0.8,  hp: 2,  score: 150,  r: 0.42 },
   shooter:  { spr: 'enemyBlack1',      size: 0.9,  hp: 4,  score: 300,  r: 0.48, fire: 1.5 },
-  heavy:    { spr: 'enemyGreen4',      size: 1.0,  hp: 8,  score: 600,  r: 0.52, fire: 2.0, fan: 3 },
+  heavy:    { spr: 'enemyGreen4',      size: 1.0,  hp: 8,  score: 600,  r: 0.52, fire: 2.0, fan: 3, salvage: true },
   sniper:   { spr: 'enemyBlack3',      size: 0.85, hp: 4,  score: 400,  r: 0.46, fire: 1.8, fast: 1.7 },
   dasher:   { spr: 'enemyBlue4',       size: 0.85, hp: 3,  score: 350,  r: 0.46 },
-  missile:  { spr: 'spaceMissiles_001', size: 0.5, hp: 1,  score: 80,   r: 0.3, flip: true },
+  missile:  { spr: 'spaceMissiles_001', size: 0.5, hp: 1,  score: 80,   r: 0.3, flip: true, noRevenge: true },
   ufo:      { spr: 'ufoGreen',         size: 0.75, hp: 5,  score: 800,  r: 0.42, drop: 'shield' },
   ufoStar:  { spr: 'ufoBlue',          size: 0.75, hp: 6,  score: 800,  r: 0.42, drop: 'star' },
   ufoS:     { spr: 'ufoRed',           size: 0.5,  hp: 1,  score: 120,  r: 0.32, spin: 3 },
-  meteor:   { spr: 'meteorBrown_big1', size: 1.3,  hp: 6,  score: 60,   r: 0.62, spin: 1 },
-  meteorS:  { spr: 'meteorBrown_med1', size: 0.55, hp: 2,  score: 30,   r: 0.3,  spin: 1 },
-  rocket:   { spr: 'spaceRockets_002', size: 1.1,  hp: 24, score: 2000, r: 0.7, flip: true },
-  mid:      { spr: 'spaceShips_004',   size: 1.9,  hp: 48, score: 3000, r: 0.9,  flip: true, fire: 1.2, fan: 3 },
+  meteor:   { spr: 'meteorBrown_big1', size: 1.3,  hp: 6,  score: 60,   r: 0.62, spin: 1, noRevenge: true },
+  meteorS:  { spr: 'meteorBrown_med1', size: 0.55, hp: 2,  score: 30,   r: 0.3,  spin: 1, noRevenge: true },
+  rocket:   { spr: 'spaceRockets_002', size: 1.1,  hp: 24, score: 2000, r: 0.7, flip: true, noRevenge: true, salvage: true },
+  mid:      { spr: 'spaceShips_004',   size: 1.9,  hp: 48, score: 3000, r: 0.9,  flip: true, fire: 1.2, fan: 3, salvage: true },
 };
+
+// HARD でボスに追加される攻撃
+const BOSS_EXTRA = { cruiser: 'snipe', rig: 'wall', mother: 'rain', twins: 'missiles', fortress: 'spiral', core: 'cross' };
 
 // ================= 背景 =================
 export class Backdrop {
@@ -64,7 +69,6 @@ export class Backdrop {
       this.skyCache = g;
     }
     ctx.fillStyle = this.skyCache; ctx.fillRect(0, 0, W, H);
-    // 星雲などの雲
     if (this.cloudImg) {
       for (const c of this.clouds) {
         const k = F / c.z, x = VPX + (c.x - cx * 0.5) * k, y = VPY + (c.y - cy * 0.5) * k, r = c.s * k;
@@ -74,7 +78,6 @@ export class Backdrop {
       }
       ctx.globalAlpha = 1;
     }
-    // 星
     ctx.fillStyle = th.star;
     for (const s of this.stars) {
       const k = F / s.z, x = VPX + (s.x - cx * 0.2) * k, y = VPY + (s.y - cy * 0.2) * k;
@@ -84,7 +87,6 @@ export class Backdrop {
       ctx.fillRect(x - r / 2, y - r / 2, r, r * (1 + 6 / s.z));
     }
     ctx.globalAlpha = 1;
-    // 床グリッド（y = 2.6 の平面）
     const gy = 2.6 - cy, gc = th.grid;
     ctx.strokeStyle = `rgba(${gc},0.22)`; ctx.lineWidth = 1;
     ctx.beginPath();
@@ -104,35 +106,63 @@ export class Backdrop {
 }
 
 // ================= ゲーム =================
+// opts: ship, stage, t, continues, parts[], hard, mut[], daily, single, god, bot, onMedal(m), onCombo(id)
 export class Game {
   constructor(opts = {}) {
     this.opts = opts;
-    this.ship = SHIPS[opts.ship || 0];
+    this.ship = { ...SHIPS[opts.ship || 0] };
+    this.parts = (opts.parts || []).filter(id => id && PART[id]);
+    this.combos = SYNERGIES.filter(s => s.parts.every(p => this.parts.includes(p))).map(s => s.id);
+    this.support = this.parts.some(id => PART[id].cat === 'sup');
+    this.hard = !!opts.hard; this.bulletMul = 1;
     this.bg = new Backdrop();
     this.stageIdx = Math.max(0, Math.min(STAGES.length - 1, opts.stage || 0));
     this.continues = opts.continues || 0;
     this.score = 0; this.kills = 0; this.maxVolley = 0; this.hits = 0;
     this.rank = this.stageIdx * 0.7;
     this.player = { x: 0, y: 0, vx: 0, shield: this.ship.shield, inv: 0, bank: 0, alive: true };
+    // パーツ・日替わりルールによる性能変化
+    if (this.has('heavy')) { this.ship.dmg += 1; this.ship.interval *= 1.33; }
+    if (this.has('slow')) this.bulletMul *= 0.75;
+    (opts.mut || []).forEach(id => { const m = MUTATORS.find(x => x.id === id); if (m) m.apply(this); });
+    this.player.shield = this.ship.shield;
     this.cam = { x: 0, y: -2 };
     this.over = false; this.allClear = false; this.deadT = 0;
     this.shake = 0; this.flash = 0;
+    this.graze = 0; this.chainN = 0; this.chainT = 0; this.regenT = 0;
+    this.roll = 0; this.rollCd = 0; this.charge = 0; this.lockStartT = 0;
+    this.opt = { x: 0, y: 0, shotT: 0 };
+    this.earned = []; this.notes = [];
     this.startStage(opts.t || 0);
+    if (!this.support) this.combos.forEach(id => { opts.onCombo && opts.onCombo(id); });
+    if (this.combos.length) this.note('COMBO ' + this.combos.map(id => SYNERGIES.find(s => s.id === id).name).join(' / '), '#c89bff');
   }
 
+  has(id) { return this.parts.includes(id); }
+  combo(id) { return this.combos.includes(id); }
   get stage() { return STAGES[this.stageIdx]; }
+  get rollDur() { return this.has('longroll') ? 0.7 : 0.5; }
+  get rollCdMax() { return this.has('longroll') ? 1.0 : 1.2; } // 無敵時間より必ず長くして連続無敵を防ぐ
 
   startStage(t0 = 0) {
     this.t = t0; this.ev = 0;
-    const evs = this.stage.events;
+    const evs = [...this.stage.events];
+    if (this.hard) { // HARD：後方から追い抜いてくる伏兵が加わる
+      for (const tt of [18, 42, 66]) evs.push([tt, g => g.ambush()]);
+      evs.sort((a, b) => a[0] - b[0]);
+    }
+    this.events = evs;
     while (this.ev < evs.length && evs[this.ev][0] < t0) this.ev++;
-    this.enemies = []; this.eBullets = []; this.shots = []; this.lasers = []; this.parts = [];
+    this.enemies = []; this.eBullets = []; this.shots = []; this.lasers = []; this.parts3 = [];
     this.items = []; this.popups = []; this.locks = []; this.timers = [];
     this.bosses = []; this.bossActive = false; this.msg = null; this.clearT = 0;
-    this.shotT = 0; this.lockT = 0; this.shotSide = 1; this.stageHits = 0;
+    this.shotT = 0; this.lockT = 0; this.shotSide = 1;
+    this.ss = { hits: 0, fullVolleys: 0, meteors: 0, ufoS: 0, missiles: 0, spawned: 0, killed: 0,
+      bossT0: null, bossTime: null, twinDeaths: [], twinGap: null };
     this.rank = Math.max(this.rank, this.stageIdx * 0.7);
     this.bg.setTheme(this.stage.theme);
-    if (t0 > 0 && t0 >= evs[evs.length - 1][0]) this.spawnBoss();
+    bgm.play('s' + (this.stageIdx + 1));
+    if (t0 > 0 && t0 >= this.stage.events[this.stage.events.length - 1][0]) this.spawnBoss();
   }
 
   // ---- 投影 ----
@@ -143,21 +173,26 @@ export class Game {
 
   // ステージごとのランク上限（1面は最大3、6面で最大9.99）
   get rankCap() { return Math.min(9.99, 3 + this.stageIdx * 1.4); }
-  get rankMul() { return (1 + Math.floor(this.rank) * 0.1) * this.ship.scoreMul; }
+  get rankMul() { return (1 + Math.floor(this.rank) * 0.1) * this.ship.scoreMul * (this.hard ? 1.3 : 1); }
   get fireMul() { return 1 + this.rank * 0.12; }
-  get bulletSpeed() { return 10.5 * (1 + this.rank * 0.05); }
+  get bulletSpeed() { return 10.5 * (1 + this.rank * 0.05) * this.bulletMul; }
 
-  cancelLocks() { this.locks.forEach(e => e.lockN = Math.max(0, e.lockN - 1)); this.locks = []; }
+  cancelLocks() { this.locks.forEach(e => e.lockN = Math.max(0, e.lockN - 1)); this.locks = []; this.charge = 0; }
   later(d, fn) { this.timers.push([this.t + d, fn]); }
   message(title, sub, dur = 2.5) { this.msg = { title, sub, t: dur }; }
+  note(text, color = '#ffd23f') { this.notes.push({ text, color, t: 0 }); }
   stageIntro() {
     const s = this.stage;
     this.message(`STAGE ${this.stageIdx + 1}`, `${s.name} ─ ${s.jp}`, 3);
-    if (this.stageIdx === 0) this.later(3.2, () => this.message('', 'ドラッグで移動 / ショットは自動', 3));
+    if (this.stageIdx === 0 && !this.opts.daily) {
+      this.later(3.2, () => this.message('', 'ドラッグで移動 / ショットは自動', 3));
+      this.later(22, () => this.message('', 'ダブルタップで宙返り（一瞬無敵）', 3));
+    }
   }
   warning() {
     this.message('WARNING', BOSSES[this.stage.boss].name + ' 接近', 3.5);
     sfx.play('charge', 0.8, 0.7);
+    bgm.stop();
   }
 
   spawn(type, x, y, z, mv) {
@@ -166,26 +201,45 @@ export class Game {
       lockN: 0, flash: 0, rot: Math.random() * 6, alive: true };
     if (type === 'fighter' || type === 'fighter2' || type === 'ufoS') e.fireT = 1.5 + Math.random() * 3;
     this.enemies.push(e);
+    this.ss.spawned++;
     return e;
+  }
+
+  // HARD の伏兵：画面手前（自機の後ろ）から追い抜いて前に出て、振り返って撃ってくる
+  ambush() {
+    const p = this.player;
+    this.message('', '後方から敵機！', 2);
+    for (let i = 0; i < 4; i++) {
+      const side = i % 2 ? 1 : -1, x = Math.max(-2, Math.min(2, p.x + side * (1.3 + (i >> 1) * 0.6)));
+      const e = this.spawn('fighter2', x, -1.2 + i * 0.5, 1.3, (e, dt) => {
+        if (e.st === 0) { e.z += 13 * dt; e.x += (0 - e.x) * dt * 0.3; if (e.z >= 15 + i * 1.5) { e.st = 1; e.ht = 0; } }
+        else if (e.st === 1) { e.ht += dt; e.x += Math.sin(e.ht * 2 + i) * dt; if (e.ht > 3) e.st = 2; }
+        else { e.y -= 3 * dt; e.z += 5 * dt; }
+      });
+      e.fireT = 1.2 + i * 0.3;
+    }
   }
 
   spawnBoss() {
     const def = BOSSES[this.stage.boss];
-    const hpMul = 1 + this.continues * 0; // コンティニューしても体力は同じ
     def.parts.forEach((pt, i) => {
+      const hp = pt.hp * (this.hard ? 1.25 : 1);
       const e = { type: 'boss', d: { spr: pt.spr, size: pt.size, r: pt.r, flip: pt.flip, score: Math.round(30000 * (this.stageIdx + 1) / def.parts.length) },
-        x: pt.dx || 0, y: -0.7, z: ZFAR, hp: pt.hp * hpMul, maxHp: pt.hp * hpMul, t: 0, lockN: 0, flash: 0,
+        x: pt.dx || 0, y: -0.7, z: ZFAR, hp, maxHp: hp, t: 0, lockN: 0, flash: 0,
         rot: 0, spin: pt.spin || 0, alive: true, boss: def, idx: i, dx: pt.dx || 0, bt: 0, atk: i, atkT: 2 + i * 0.8 };
       this.enemies.push(e); this.bosses.push(e);
     });
     this.bossActive = true;
+    this.ss.bossT0 = this.t;
+    bgm.play('boss');
   }
 
   // ================= 更新 =================
   update(dt) {
     const p = this.player;
-    this.t += dt;
-    const evs = this.stage.events;
+    if (this.over) { this.bg.update(dt, 6); this.updateParts(dt); return; } // リザルト中は演出だけ
+    this.t += dt; this.age = (this.age || 0) + dt;
+    const evs = this.events;
     while (this.ev < evs.length && evs[this.ev][0] <= this.t) evs[this.ev++][1](this);
     if (this.timers.length) {
       const due = this.timers.filter(tm => tm[0] <= this.t);
@@ -197,6 +251,8 @@ export class Game {
     this.shake = Math.max(0, this.shake - dt * 3);
     this.flash = Math.max(0, this.flash - dt * 2.5);
     if (this.msg && (this.msg.t -= dt) <= 0) this.msg = null;
+    this.chainT = Math.max(0, this.chainT - dt);
+    if (this.chainT <= 0) this.chainN = 0;
 
     // --- 自機 ---
     if (p.alive) {
@@ -207,7 +263,13 @@ export class Game {
       p.vx = (nx - p.x) / dt; p.x = nx; p.y = ny;
       p.bank += (Math.max(-1, Math.min(1, p.vx * 0.12)) - p.bank) * Math.min(1, dt * 10);
       p.inv = Math.max(0, p.inv - dt);
-      if (this.clearT <= 0) { this.autoFire(dt); this.updateLock(dt); }
+      // 宙返り
+      this.roll = Math.max(0, this.roll - dt); this.rollCd = Math.max(0, this.rollCd - dt);
+      if (input.doubleTap && this.rollCd <= 0 && this.age > 0.5) this.doRoll();
+      // シールド再生
+      this.regenT += dt;
+      if (this.has('regen') && this.regenT > 3) p.shield = Math.min(this.ship.shield, p.shield + 2.5 * dt);
+      if (this.clearT <= 0) { this.autoFire(dt); this.updateOption(dt); this.updateLock(dt); }
     } else {
       this.deadT += dt;
       if (this.deadT > 2.2) this.over = true;
@@ -227,7 +289,7 @@ export class Game {
     if (this.clearT > 0) {
       this.clearT -= dt;
       if (this.clearT <= 0) {
-        if (this.stageIdx >= STAGES.length - 1) { this.allClear = true; this.over = true; }
+        if (this.stageIdx >= STAGES.length - 1 || this.opts.single) { this.allClear = true; this.over = true; }
         else {
           this.stageIdx++;
           p.shield = Math.min(this.ship.shield, p.shield + this.ship.shield * 0.5);
@@ -237,19 +299,36 @@ export class Game {
     }
   }
 
-  // テスト用の自動操縦：一番近い敵に寄せ、定期的に長押し→離す
+  doRoll() {
+    this.roll = this.rollDur; this.rollCd = this.rollCdMax;
+    sfx.play('shield', 0.35, 1.6);
+    if (this.combo('dancer') && this.graze >= 100) { // PHASE DANCER：前方の敵を一瞬で全ロック
+      this.graze = 0;
+      const p = this.player;
+      const cands = this.enemies.filter(e => e.alive && e.z > ZP + 1.5 && e.z < 34).sort((a, b) => a.z - b.z);
+      for (const e of cands) {
+        if (this.locks.length >= this.ship.lockMax) break;
+        this.locks.push(e); e.lockN++;
+      }
+      this.note('PHASE DANCER', '#c89bff'); sfx.play('lock', 0.7, 1.8);
+      this.fireVolley();
+    }
+  }
+
+  // テスト用の自動操縦：一番近い敵に寄せ、定期的に長押し→離す、弾が近いと宙返り
   botMove(dt) {
     const p = this.player;
     let best = null, bd = 1e9;
     for (const e of this.enemies) if (e.z > ZP + 2 && e.z < 30 && e.z < bd) { bd = e.z; best = e; }
-    let tx = 0, ty = 0;
+    let tx = 0, ty = 0, danger = false;
     if (best) { tx = best.x; ty = best.y; }
-    for (const b of this.eBullets) if (b.z < ZP + 4 && Math.hypot(b.x - p.x, b.y - p.y) < 0.5) { tx = p.x + (b.x > p.x ? -1 : 1); }
+    for (const b of this.eBullets) if (b.z < ZP + 4 && Math.hypot(b.x - p.x, b.y - p.y) < 0.5) { tx = p.x + (b.x > p.x ? -1 : 1); danger = true; }
     this.botT = (this.botT || 0) + dt;
     const cyc = this.botT % 2.2;
     input.down = cyc < 1.8;
     if (cyc >= 1.8 && cyc - dt < 1.8) input.released = true;
     input.holdTime = input.down ? cyc : 0;
+    if (danger && this.opts.botRoll && this.rollCd <= 0) this.doRoll();
     return [(tx - p.x) * Math.min(1, dt * 4), (ty - p.y) * Math.min(1, dt * 4)];
   }
 
@@ -275,7 +354,7 @@ export class Game {
     this.shotSide2 = !this.shotSide2;
     if (this.shotSide2) sfx.play('shot', 0.16, s.shot === 'pierce' ? 0.8 : 1.1);
   }
-  addShot(x, y, z, assist, vx = 0, pierce = false) {
+  addShot(x, y, z, assist, vx = 0, pierce = false, dmg = this.ship.dmg) {
     let vy = 0;
     if (assist) { // 弱いエイムアシスト：近くの敵に向けて弾道を少し曲げる
       let best = null, bd = 0.55;
@@ -286,14 +365,28 @@ export class Game {
       }
       if (best) { const tt = (best.z - z) / SHOT_SPEED; vx = (best.x - x) / tt; vy = (best.y - y) / tt; }
     }
-    this.shots.push({ x, y, z, vx, vy, pierce, hit: pierce ? new Set() : null });
+    this.shots.push({ x, y, z, vx, vy, pierce, dmg, hit: pierce ? new Set() : null });
+  }
+  // 随伴機（OPTION）
+  updateOption(dt) {
+    if (!this.has('option')) return;
+    const p = this.player, o = this.opt, k = Math.min(1, dt * 6);
+    o.x += (p.x - 0.6 - o.x) * k; o.y += (p.y - 0.25 - o.y) * k;
+    o.shotT -= dt;
+    if (o.shotT <= 0) {
+      const cannon = this.combo('cannon');
+      o.shotT = cannon ? 0.14 : 0.2;
+      this.addShot(o.x, o.y, ZP + 0.3, true, 0, false, cannon ? this.ship.dmg + 1 : 1);
+    }
   }
 
   // ---- ロックオン ----
   updateLock(dt) {
-    const p = this.player, s = this.ship;
+    const p = this.player, s = this.ship, auto = this.has('autolock');
     this.locks = this.locks.filter(l => l.alive);
-    if (input.down && input.holdTime > 0.15) {
+    const holding = input.down && input.holdTime > 0.15;
+    if (holding || auto) {
+      if (holding && this.has('charge') && this.locks.length) this.charge = Math.min(1.5, this.charge + dt);
       this.lockT -= dt;
       if (this.lockT <= 0 && this.locks.length < s.lockMax) {
         let best = null, bz = 1e9;
@@ -305,31 +398,36 @@ export class Game {
           if (e.z < bz) { bz = e.z; best = e; }
         }
         if (best) {
-          best.lockN++; this.locks.push(best); this.lockT = s.lockInt;
+          if (!this.locks.length) this.lockStartT = this.t;
+          best.lockN++; this.locks.push(best); this.lockT = s.lockInt * (auto && !holding ? 1.6 : 1);
           sfx.play('lock', 0.45, 1 + this.locks.length * 0.06);
         }
       }
     }
     if (input.released && this.locks.length) this.fireVolley();
+    else if (input.released) this.charge = 0;
+    // オートロック：たまったら自動で発射
+    if (auto && !holding && this.locks.length && (this.locks.length >= Math.min(4, s.lockMax) || this.t - this.lockStartT > 1.0)) this.fireVolley();
   }
 
   fireVolley() {
-    const p = this.player, n = this.locks.length;
-    const volley = { n, kills: 0 };
+    const p = this.player, n = this.locks.length, s = this.ship;
+    const volley = { n, kills: 0, power: 1, dmgMul: 1 + this.charge / 1.5, charged: this.charge >= 0.75 };
+    if (this.has('graze') && this.graze >= 100) { volley.power = 2; this.graze = 0; this.note('GRAZE BURST', '#c89bff'); }
+    if (n === s.lockMax) this.ss.fullVolleys++;
     this.locks.forEach((e, i) => {
       const side = i % 2 ? 1 : -1;
-      this.lasers.push({ e, volley, t: 0, dur: 0.26 + i * 0.03,
+      this.lasers.push({ e, volley, t: 0, dur: 0.26 + i * 0.03, dmg: s.laserDmg * volley.dmgMul * volley.power,
         sx: p.x, sy: p.y, sz: ZP + 0.2,
         cx: p.x + side * (0.8 + Math.random()), cy: p.y - 0.8 - Math.random(), cz: ZP + 2 + Math.random() * 2,
         tx: e.x, ty: e.y, tz: e.z, trail: [] });
     });
     this.maxVolley = Math.max(this.maxVolley, n);
-    this.locks = [];
+    this.locks = []; this.charge = 0;
     sfx.play('laser', 0.6, 1.25 - Math.min(8, n) * 0.03);
   }
 
   updateShots(dt) {
-    const dmg = this.ship.dmg;
     for (const s of this.shots) {
       const pz = s.z;
       s.x += s.vx * dt; s.y += s.vy * dt; s.z += SHOT_SPEED * dt;
@@ -338,7 +436,7 @@ export class Game {
         const r = e.d.r;
         if (e.z + r * 0.8 < pz || e.z - r * 0.8 > s.z) continue;
         if (Math.hypot(e.x - s.x, e.y - s.y) < r + 0.06) {
-          this.damage(e, dmg, null);
+          this.damage(e, s.dmg, null);
           this.spark(s.x, s.y, e.z - 0.2, glow.blue, 3);
           if (s.pierce && e.type !== 'boss') s.hit.add(e);
           else { s.dead = true; break; }
@@ -358,11 +456,12 @@ export class Game {
       else {
         e.mv(e, dt, this);
         const d = e.d;
-        const canFire = d.fire || (this.rank >= 3 && (e.type === 'fighter' || e.type === 'fighter2' || e.type === 'ufoS'));
+        const small = e.type === 'fighter' || e.type === 'fighter2' || e.type === 'ufoS';
+        const canFire = d.fire || (small && (this.rank >= 3 || this.hard));
         if (canFire && e.z > 7 && e.z < 32 && p.alive && this.clearT <= 0) {
           e.fireT -= dt * this.fireMul;
           if (e.fireT <= 0) {
-            e.fireT = d.fire || 3.2;
+            e.fireT = d.fire || (this.hard ? 2.6 : 3.2);
             this.fireAt(e, d.fan || 1, 0.75, d.fast || 1);
           }
         }
@@ -393,16 +492,20 @@ export class Game {
       e.z = def.z + Math.sin(t * 0.35) * 2.5 - (ph >= 2 ? 1.5 : 0);
     }
     if (!this.player.alive || this.clearT > 0) return;
-    e.atkT -= dt * (0.8 + this.fireMul * 0.25) * (1 + ph * 0.3);
+    const desperate = this.hard && this.bossHpFrac() < 0.15; // HARD：瀕死で攻撃が激化
+    e.atkT -= dt * (0.8 + this.fireMul * 0.25) * (1 + ph * 0.3) * (desperate ? 1.4 : 1);
     if (e.atkT > 0) return;
-    const pats = def.phases[ph];
+    const pats = this.hard ? [...def.phases[ph], BOSS_EXTRA[this.stage.boss]] : def.phases[ph];
     e.atkT = this.bossAttack(e, pats[e.atk++ % pats.length], ph);
   }
-  bossPhase() {
+  bossHpFrac() {
     let hp = 0, max = 0;
     for (const b of this.bosses) { hp += Math.max(0, b.hp); max += b.maxHp; }
+    return hp / max;
+  }
+  bossPhase() {
     const n = this.bosses[0].boss.phases.length;
-    return Math.min(n - 1, Math.floor((1 - hp / max) * n));
+    return Math.min(n - 1, Math.floor((1 - this.bossHpFrac()) * n));
   }
   // 攻撃を実行し、次の攻撃までの秒数を返す
   bossAttack(e, pat, ph) {
@@ -413,6 +516,18 @@ export class Game {
       case 'burst':
         for (let i = 0; i < 3 + ph; i++) this.later(i * 0.18, () => e.alive && this.fireAt(e, ph ? 3 : 1, 0.7));
         return 1.6;
+      case 'snipe': // 高速の狙い撃ち
+        for (let i = 0; i < 3; i++) this.later(i * 0.25, () => e.alive && this.fireAt(e, 1, 0, 1.8));
+        return 1.4;
+      case 'cross': { // 自機を中心に十字の弾。止まっていれば安全、縦横に動くと危険
+        for (let i = -4; i <= 4; i++) {
+          if (i === 0) continue;
+          this.addBullet(e, p.x + i * 0.45, p.y, sp * 0.8);
+          this.addBullet(e, p.x, p.y + i * 0.4, sp * 0.8);
+        }
+        sfx.play('zap', 0.5, 1.4);
+        return 1.8;
+      }
       case 'spiral': {
         const n = 18 + ph * 6, a0 = Math.random() * 6;
         for (let i = 0; i < n; i++) this.later(i * 0.05, () => {
@@ -485,12 +600,18 @@ export class Game {
   }
 
   updateEnemyBullets(dt) {
-    const p = this.player, hr = this.ship.hitR + 0.06;
+    const p = this.player, hr = this.ship.hitR + 0.06, graze = this.has('graze');
     for (const b of this.eBullets) {
       const pz = b.z;
       b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
-      if (p.alive && pz >= ZP && b.z < ZP && Math.hypot(b.x - p.x, b.y - p.y) < hr) {
-        b.dead = true; this.hurt(20);
+      if (p.alive && pz >= ZP && b.z < ZP) {
+        const d = Math.hypot(b.x - p.x, b.y - p.y);
+        if (d < hr && this.roll <= 0) { b.dead = true; this.hurt(20); }
+        else if (graze && d < hr + 0.4 && this.graze < 100) {
+          this.graze = Math.min(100, this.graze + 8);
+          this.spark(b.x, b.y, ZP + 0.3, glow.white, 2);
+          if (this.graze >= 100) { sfx.play('item', 0.5, 1.5); this.note('GRAZE MAX', '#c89bff'); }
+        }
       }
     }
     this.eBullets = this.eBullets.filter(b => !b.dead && b.z > 1);
@@ -507,24 +628,38 @@ export class Game {
       L.trail.push([x, y, z]);
       if (L.trail.length > 9) L.trail.shift();
       if (L.t >= 1 && !L.done) {
-        L.done = true; L.e.lockN = Math.max(0, L.e.lockN - 1);
-        if (L.e.alive) { this.damage(L.e, this.ship.laserDmg, L.volley); this.spark(x, y, z, glow.green, 6); }
+        L.done = true;
+        if (!L.mini) L.e.lockN = Math.max(0, L.e.lockN - 1);
+        if (L.e.alive) { this.damage(L.e, L.dmg, L.volley); this.spark(x, y, z, glow.green, 6); }
+        if (!L.mini && this.has('split')) this.splitLaser(x, y, z, L);
       }
       if (L.done) L.fade = (L.fade || 0) + dt * 6;
     }
     this.lasers = this.lasers.filter(L => !L.done || L.fade < 1);
   }
+  // SPLIT LASER：命中点から近くの敵へ分裂
+  splitLaser(x, y, z, L) {
+    const n = this.combo('prism') && L.volley.charged ? 4 : 2;
+    const cands = this.enemies.filter(e => e.alive && e !== L.e && e.z > ZP + 1)
+      .map(e => [e, Math.hypot(e.x - x, e.y - y, (e.z - z) * 0.3)]).filter(a => a[1] < 3.5)
+      .sort((a, b) => a[1] - b[1]).slice(0, n);
+    for (const [e] of cands) {
+      this.lasers.push({ e, volley: L.volley, t: 0, dur: 0.2, mini: true, dmg: 3 * L.volley.power,
+        sx: x, sy: y, sz: z, cx: (x + e.x) / 2 + (Math.random() - 0.5), cy: (y + e.y) / 2 - 0.5, cz: (z + e.z) / 2,
+        tx: e.x, ty: e.y, tz: e.z, trail: [] });
+    }
+  }
 
   updateItems(dt) {
-    const p = this.player;
+    const p = this.player, mag = this.has('magnet');
     for (const it of this.items) {
       it.z -= 9 * dt; it.t += dt;
-      // 近づいたら自機に吸い寄せる
-      if (it.z < ZP + 5) { it.x += (p.x - it.x) * Math.min(1, dt * 3); it.y += (p.y - it.y) * Math.min(1, dt * 3); }
+      // 近づいたら自機に吸い寄せる（MAGNET なら遠くから）
+      if (it.z < ZP + (mag ? 22 : 5)) { const k = Math.min(1, dt * (mag ? 5 : 3)); it.x += (p.x - it.x) * k; it.y += (p.y - it.y) * k; }
       if (p.alive && Math.abs(it.z - ZP) < 0.6 && Math.hypot(it.x - p.x, it.y - p.y) < 0.7) {
         it.dead = true;
         if (it.kind === 'shield') {
-          p.shield = Math.min(this.ship.shield, p.shield + this.ship.shield * 0.35);
+          p.shield = Math.min(this.ship.shield, p.shield + this.ship.shield * 0.35 * (mag ? 1.5 : 1));
           sfx.play('shield', 0.8); this.popupWorld(it.x, it.y, it.z, 'SHIELD +', '#7fdcff');
         } else {
           const pts = Math.round(5000 * (this.stageIdx + 1) * this.rankMul / 10) * 10;
@@ -537,12 +672,14 @@ export class Game {
   }
 
   updateParts(dt) {
-    for (const q of this.parts) {
+    for (const q of this.parts3) {
       q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt - 6 * dt; q.t += dt;
     }
-    this.parts = this.parts.filter(q => q.t < q.life && q.z > 0.8);
+    this.parts3 = this.parts3.filter(q => q.t < q.life && q.z > 0.8);
     for (const pp of this.popups) { pp.t += dt; pp.y -= 22 * dt; }
     this.popups = this.popups.filter(pp => pp.t < 1.1);
+    for (const n of this.notes) n.t += dt;
+    this.notes = this.notes.filter(n => n.t < 2.5);
   }
 
   // ---- ダメージ・撃破 ----
@@ -551,22 +688,44 @@ export class Game {
     e.hp -= dmg; e.flash = 0.07;
     if (e.hp > 0) { sfx.play('hit', 0.25, 1.3); return; }
     e.alive = false; this.kills++;
-    const mul = (volley && !e.boss ? volley.n : 1) * this.rankMul; // ボスは一斉発射の倍率対象外
-    const pts = Math.round(e.d.score * mul / 10) * 10;
+    const ss = this.ss;
+    if (!e.boss) ss.killed++;
+    if (e.type === 'meteor' || e.type === 'meteorS') ss.meteors++;
+    if (e.type === 'ufoS') ss.ufoS++;
+    if (e.type === 'missile') ss.missiles++;
+    const mul = (volley && !e.boss ? volley.n * volley.power : 1) * this.rankMul; // ボスは一斉発射の倍率対象外
+    let pts = Math.round(e.d.score * mul / 10) * 10;
+    if (this.has('chain')) {
+      this.chainN = this.chainT > 0 ? this.chainN + 1 : 1; this.chainT = 1.2;
+      pts += Math.round(this.chainN * 10 * this.rankMul);
+    }
     this.score += pts;
     if (volley) volley.kills++;
-    this.popupWorld(e.x, e.y, e.z, volley && volley.n > 1 ? `${pts} x${volley.n}` : `${pts}`,
+    this.popupWorld(e.x, e.y, e.z, volley && volley.n > 1 && !e.boss ? `${pts} x${volley.n * volley.power}` : `${pts}`,
       volley && volley.n >= 6 ? '#ffd23f' : volley ? '#9dffb0' : '#ffffff');
     if (volley && volley.n >= 4) this.rank = Math.min(this.rankCap, this.rank + 0.005 * volley.n);
     if (e.d.drop) this.items.push({ x: e.x, y: e.y, z: e.z, t: 0, kind: e.d.drop });
+    else if (e.d.salvage && this.combo('salvage')) {
+      this.salvN = (this.salvN || 0) + 1;
+      this.items.push({ x: e.x, y: e.y, z: e.z, t: 0, kind: this.salvN % 2 ? 'shield' : 'star' });
+    }
+    // HARD：撃ち返し弾
+    if (this.hard && !e.boss && !e.d.noRevenge && e.z > 7 && this.player.alive) this.addBullet(e, this.player.x, this.player.y, this.bulletSpeed * 0.7);
     const big = e.boss ? 2.2 : e.d.size;
     this.explode(e.x, e.y, e.z, big);
     sfx.play(big > 1 ? 'bigexplode' : 'explode', e.boss ? 0.9 : 0.55, 0.9 + Math.random() * 0.3);
-    if (e.boss) { this.shake = 1; this.flash = 0.6; }
+    if (e.boss) {
+      this.shake = 1; this.flash = 0.6;
+      ss.twinDeaths.push(this.t);
+      if (ss.twinDeaths.length === 2) ss.twinGap = ss.twinDeaths[1] - ss.twinDeaths[0];
+    }
   }
 
   stageClear() {
     this.bossActive = false;
+    bgm.stop();
+    const ss = this.ss;
+    ss.bossTime = this.t - ss.bossT0;
     const last = this.bosses[this.bosses.length - 1] || { x: 0, y: -0.7, z: 11 };
     for (let i = 0; i < 8; i++) this.later(i * 0.18, () => {
       this.explode(last.x + (Math.random() - 0.5) * 2.5, last.y + (Math.random() - 0.5) * 1.5, last.z, 1.6);
@@ -576,7 +735,7 @@ export class Game {
     this.later(1.5, () => { sfx.play('boom', 1); this.flash = 1; });
     const p = this.player, n = this.stageIdx + 1;
     const shieldBonus = Math.round(p.shield / this.ship.shield * 100) * 100 * n;
-    const perfect = this.stageHits === 0 ? 20000 * n : 0;
+    const perfect = ss.hits === 0 ? 20000 * n : 0;
     this.score += shieldBonus + perfect;
     this.eBullets = [];
     for (const m of this.enemies) { m.alive = false; this.explode(m.x, m.y, m.z, 0.6); }
@@ -585,18 +744,35 @@ export class Game {
     this.message(final ? 'ALL CLEAR' : 'STAGE CLEAR',
       `SHIELD BONUS ${shieldBonus}` + (perfect ? `  /  NO DAMAGE ${perfect}` : ''), 4.5);
     this.clearT = final ? 5.5 : 5;
+    // 勲章（サポートパーツ・日替わりは対象外）
+    if (!this.support && !this.opts.daily) {
+      let k = 0;
+      for (const m of MEDALS) {
+        if (m.stage !== this.stageIdx || !m.test(ss)) continue;
+        const isNew = this.opts.onMedal ? this.opts.onMedal(m, this) : true;
+        if (isNew) this.earned.push(m.id);
+        if (isNew) this.later(1.8 + k++ * 0.7, () => { this.note('MEDAL ◆ ' + m.name, '#ffd23f'); sfx.play('item', 0.7, 1.2); });
+      }
+    }
   }
 
   hurt(dmg) {
     const p = this.player;
-    if (p.inv > 0 || !p.alive || this.opts.god || this.clearT > 0) return;
-    p.shield -= dmg; p.inv = 1.2; this.hits++; this.stageHits++;
+    if (p.inv > 0 || this.roll > 0 || !p.alive || this.opts.god || this.clearT > 0) return;
+    if (this.has('guard')) dmg *= 0.5;
+    p.shield -= dmg; p.inv = 1.2; this.hits++; this.ss.hits++; this.regenT = 0;
     this.shake = 1; this.flash = 0.5;
     this.rank = Math.max(this.stageIdx * 0.7, this.rank - 1.5); // 被弾で難易度が下がる
     this.cancelLocks();
     sfx.play('damage', 0.9);
+    if (this.has('barrier')) { // BURST BARRIER：周囲の敵弾を消す
+      let n = 0;
+      for (const b of this.eBullets) if (b.z < ZP + 10 && Math.hypot(b.x - p.x, b.y - p.y) < 2) { b.dead = true; n++; this.spark(b.x, b.y, Math.max(ZP + 0.5, b.z), glow.blue, 1); }
+      if (n && this.combo('counter')) { this.chainN += n; this.chainT = 1.2; this.note(`COUNTER +${n}`, '#c89bff'); }
+    }
     if (p.shield <= 0) {
       p.shield = 0; p.alive = false;
+      bgm.stop();
       this.explode(p.x, p.y, ZP + 0.5, 1.4);
       sfx.play('lose', 0.9); sfx.play('bigexplode', 0.9, 0.8);
     }
@@ -604,18 +780,18 @@ export class Game {
 
   // ---- エフェクト ----
   explode(x, y, z, size) {
-    this.parts.push({ x, y, z, vx: 0, vy: 0, vz: 0, t: 0, life: 0.45, ring: true, s: size * 1.6 });
+    this.parts3.push({ x, y, z, vx: 0, vy: 0, vz: 0, t: 0, life: 0.45, ring: true, s: size * 1.6 });
     const n = Math.min(40, 10 + size * 8);
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2, b = Math.random() * 2 - 1, sp = (1.5 + Math.random() * 3) * size;
-      this.parts.push({ x, y, z, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp * 0.8, vz: b * sp,
+      this.parts3.push({ x, y, z, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp * 0.8, vz: b * sp,
         t: 0, life: 0.4 + Math.random() * 0.5, g: Math.random() < 0.5 ? glow.orange : glow.red, s: 0.12 + Math.random() * 0.12 * size });
     }
   }
   spark(x, y, z, g, n) {
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2, sp = 1 + Math.random() * 2;
-      this.parts.push({ x, y, z, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, vz: 0, t: 0, life: 0.25, g, s: 0.08 });
+      this.parts3.push({ x, y, z, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, vz: 0, t: 0, life: 0.25, g, s: 0.08 });
     }
   }
   popupWorld(x, y, z, text, color) {
@@ -630,12 +806,11 @@ export class Game {
     if (this.shake > 0) ctx.translate((Math.random() - 0.5) * 10 * this.shake, (Math.random() - 0.5) * 10 * this.shake);
     this.bg.draw(ctx, this.cam.x, this.cam.y);
 
-    // 奥から順に描く
     const list = [];
     for (const e of this.enemies) list.push([e.z, 0, e]);
     for (const b of this.eBullets) list.push([b.z, 1, b]);
     for (const s of this.shots) list.push([s.z, 2, s]);
-    for (const q of this.parts) list.push([q.z, 3, q]);
+    for (const q of this.parts3) list.push([q.z, 3, q]);
     for (const it of this.items) list.push([it.z, 4, it]);
     if (p.alive) list.push([ZP, 5, p]);
     list.sort((a, b) => b[0] - a[0]);
@@ -662,11 +837,12 @@ export class Game {
   drawEnemy(ctx, e, x, y, k, fog) {
     const w = e.d.size * k;
     if (w < 1) return;
+    const rot = e.d.spin || e.spin ? e.rot : 0;
     ctx.globalAlpha = fog;
-    drawSpr(ctx, e.d.spr, x, y, w, e.rot && (e.d.spin || e.spin) ? e.rot : 0, e.d.flip);
+    drawSpr(ctx, e.d.spr, x, y, w, rot, e.d.flip);
     if (e.flash > 0) {
       ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.6;
-      drawSpr(ctx, e.d.spr, x, y, w, e.rot && (e.d.spin || e.spin) ? e.rot : 0, e.d.flip);
+      drawSpr(ctx, e.d.spr, x, y, w, rot, e.d.flip);
       ctx.globalCompositeOperation = 'source-over';
     }
     ctx.globalAlpha = 1;
@@ -693,12 +869,22 @@ export class Game {
 
   drawPlayer(ctx, x, y, k) {
     const p = this.player;
-    if (p.inv > 0 && Math.floor(p.inv * 20) % 2) return;
+    if (p.inv > 0 && this.roll <= 0 && Math.floor(p.inv * 20) % 2) return;
     const w = 0.75 * k;
+    // 随伴機
+    if (this.has('option')) {
+      const [ox, oy, ok] = this.proj(this.opt.x, this.opt.y, ZP);
+      ctx.globalCompositeOperation = 'lighter'; drawGlow(ctx, glow.green, ox, oy, 0.25 * ok); ctx.globalCompositeOperation = 'source-over';
+      drawSpr(ctx, 'playerLife1_blue', ox, oy, 0.35 * ok);
+    }
     ctx.globalCompositeOperation = 'lighter';
     drawGlow(ctx, glow.blue, x, y + w * 0.32, w * (0.18 + Math.random() * 0.05));
+    if (this.roll > 0) drawGlow(ctx, glow.white, x, y, w * 0.7);
     ctx.globalCompositeOperation = 'source-over';
-    ctx.save(); ctx.translate(x, y); ctx.rotate(p.bank * 0.45); ctx.scale(1 - Math.abs(p.bank) * 0.25, 1);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(p.bank * 0.45);
+    // 宙返り中は機体を横回転させる
+    const sx = this.roll > 0 ? Math.cos((1 - this.roll / this.rollDur) * Math.PI * 2) : 1 - Math.abs(p.bank) * 0.25;
+    ctx.scale(Math.abs(sx) < 0.08 ? 0.08 : sx, 1);
     drawSpr(ctx, this.ship.spr, 0, 0, w);
     ctx.restore();
     if (this.ship.hitR < 0.15) { // 当たり判定の小さい機体は判定点を表示
@@ -711,15 +897,15 @@ export class Game {
     ctx.lineCap = 'round';
     for (const L of this.lasers) {
       const pts = L.trail.map(([x, y, z]) => this.proj(x, y, Math.max(z, 1)));
-      const a = 1 - (L.fade || 0);
+      const a = 1 - (L.fade || 0), pw = L.volley.power > 1 || L.volley.dmgMul > 1.5;
       for (let i = 1; i < pts.length; i++) {
         const f = i / pts.length;
-        ctx.strokeStyle = `rgba(90,255,150,${a * f})`;
-        ctx.lineWidth = 1 + 4 * f;
+        ctx.strokeStyle = pw ? `rgba(200,140,255,${a * f})` : `rgba(90,255,150,${a * f})`;
+        ctx.lineWidth = (L.mini ? 0.6 : 1) * (1 + 4 * f) * (pw ? 1.4 : 1);
         ctx.beginPath(); ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(pts[i][0], pts[i][1]); ctx.stroke();
       }
       const h = pts[pts.length - 1];
-      if (h && !L.done) drawGlow(ctx, glow.green, h[0], h[1], 7);
+      if (h && !L.done) drawGlow(ctx, glow.green, h[0], h[1], L.mini ? 4 : 7);
     }
     ctx.globalCompositeOperation = 'source-over';
   }
@@ -727,7 +913,7 @@ export class Game {
   drawReticle(ctx) {
     const p = this.player;
     if (!p.alive || this.clearT > 0) return;
-    const locking = input.down && input.holdTime > 0.15;
+    const locking = (input.down && input.holdTime > 0.15) || this.has('autolock');
     ctx.strokeStyle = locking ? 'rgba(255,90,90,0.85)' : 'rgba(120,255,160,0.55)';
     ctx.lineWidth = 1.5;
     for (const [dz, s] of [[6, 26], [14, 16]]) {
@@ -737,6 +923,10 @@ export class Game {
     if (locking) { // ロック範囲の目安
       const [x, y, k] = this.proj(p.x, p.y, ZP + 10);
       ctx.beginPath(); ctx.arc(x, y, this.ship.lockR * k, 0, 7); ctx.stroke();
+      if (this.charge > 0) { // チャージ量
+        ctx.strokeStyle = '#c89bff'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(x, y, this.ship.lockR * k + 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * this.charge / 1.5); ctx.stroke();
+      }
     }
   }
 
@@ -752,9 +942,13 @@ export class Game {
   drawHUD(ctx) {
     const p = this.player, s = this.ship;
     this.text(ctx, String(this.score).padStart(8, '0'), 12, 22, 16, '#ffffff', 'left');
-    this.text(ctx, `STAGE ${this.stageIdx + 1}`, 12, 42, 11, '#9fd7ff', 'left');
-    this.text(ctx, `RANK ${Math.floor(this.rank)}`, 72, 42, 11, '#ffcf5a', 'left');
-    if (this.continues) this.text(ctx, `CONTINUE ${this.continues}`, 126, 42, 11, '#ff9aa8', 'left');
+    let hx = 12;
+    const tag = (t, c) => { this.text(ctx, t, hx, 42, 11, c, 'left'); ctx.font = '700 11px system-ui, sans-serif'; hx += ctx.measureText(t).width + 10; };
+    tag(`STAGE ${this.stageIdx + 1}`, '#9fd7ff');
+    tag(`RANK ${Math.floor(this.rank)}`, '#ffcf5a');
+    if (this.hard) tag('HARD', '#ff6a7a');
+    if (this.continues) tag(`CONT ${this.continues}`, '#ff9aa8');
+    if (this.chainN > 1) this.text(ctx, `CHAIN ${this.chainN}`, 12, 60, 11, '#c89bff', 'left');
     // 一時停止ボタン
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
     ctx.fillRect(W - 30, 12, 5, 18); ctx.fillRect(W - 20, 12, 5, 18);
@@ -766,6 +960,13 @@ export class Game {
     ctx.fillStyle = sh > 0.5 ? '#4fd3ff' : sh > 0.25 ? '#ffcf5a' : '#ff4f6a';
     ctx.fillRect(bx, by, bw * sh, 8);
     this.text(ctx, 'SHIELD', bx, by - 10, 9, '#cfe8ff', 'left');
+    // 宙返りの再使用ゲージ
+    ctx.fillStyle = this.rollCd > 0 ? 'rgba(255,255,255,0.25)' : '#ffffff';
+    ctx.fillRect(bx + 50, by - 13, 30 * (1 - this.rollCd / this.rollCdMax), 3);
+    if (this.has('graze')) { // グレイズゲージ
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(bx + 88, by - 14, 62, 5);
+      ctx.fillStyle = this.graze >= 100 ? '#ffffff' : '#c89bff'; ctx.fillRect(bx + 88, by - 14, 62 * this.graze / 100, 5);
+    }
     // ロック数
     const pw = s.lockMax > 8 ? 8 : 10, gap = s.lockMax > 8 ? 2 : 3;
     for (let i = 0; i < s.lockMax; i++) {
@@ -775,11 +976,9 @@ export class Game {
     this.text(ctx, 'LOCK', W - 14 - s.lockMax * (pw + gap), by - 10, 9, '#ffb0b0', 'left');
 
     // ボスHP
-    if (this.bossActive && this.bosses.some(b => b.alive && b.z <= b.boss.z + 0.5)) {
-      let hp = 0, max = 0;
-      for (const b of this.bosses) { hp += Math.max(0, b.hp); max += b.maxHp; }
+    if (this.bossActive && this.bosses.some(b => b.alive && b.arrived)) {
       ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(60, 60, 240, 7);
-      ctx.fillStyle = '#ff5a7a'; ctx.fillRect(60, 60, 240 * hp / max, 7);
+      ctx.fillStyle = '#ff5a7a'; ctx.fillRect(60, 60, 240 * this.bossHpFrac(), 7);
       this.text(ctx, this.bosses[0].boss.name, W / 2, 76, 9, '#ffb0c0');
     }
 
@@ -787,6 +986,11 @@ export class Game {
       ctx.globalAlpha = Math.max(0, Math.min(1, 2 - pp.t * 1.8));
       this.text(ctx, pp.text, pp.x, pp.y, 11, pp.color);
     }
+    // お知らせ（勲章・コンボなど）
+    this.notes.forEach((n, i) => {
+      ctx.globalAlpha = Math.max(0, Math.min(1, (2.5 - n.t) * 2));
+      this.text(ctx, n.text, W / 2, 250 + i * 20, 13, n.color, 'center', 'SYS');
+    });
     ctx.globalAlpha = 1;
 
     if (this.msg) {
